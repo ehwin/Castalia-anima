@@ -362,10 +362,21 @@ export interface LlmResponse {
 }
 
 /**
+ * v1.11.3 重路径(总反思/深度反思/整合)的输出预算 —— 与浅层(triage 临时反思 / reflect_auto)分开。
+ * 为什么需要:推理模型(如 deepseek-v4-pro)的**思考 token 也计入 max_tokens**,8192 会被"想"吃光,
+ * 返回 finish_reason=length 且 content 为空 → 整合报 `未找到有效 JSON 结果`(实测 reasoning 18600 字符)。
+ * 浅层仍走 callLlm 的 8192 默认值,不受此影响。config.json 的 `reflect.maxTokens` 可覆盖。
+ */
+export const REFLECT_DEEP_MAX_TOKENS = (() => {
+  const v = parseInt(process.env.REFLECT_DEEP_MAX_TOKENS || '32768', 10);
+  return Number.isFinite(v) && v >= 1024 ? v : 32768;
+})();
+
+/**
  * 调用 LLM(OpenAI 兼容,非流式)。
  * 通道:缺省用 reflect(REFLECT_*);传 channel 则用指定通道(triage/reflect)。
  */
-export async function callLlm(systemPrompt: string, userPrompt: string, channel?: LlmChannel): Promise<LlmResponse | null> {
+export async function callLlm(systemPrompt: string, userPrompt: string, channel?: LlmChannel, maxTokens: number = 8192): Promise<LlmResponse | null> {
   const ch = channel ?? makeLlmChannel('reflect');
   if (!ch.apiKey) return null;
   try {
@@ -378,7 +389,7 @@ export async function callLlm(systemPrompt: string, userPrompt: string, channel?
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        max_tokens: 8192,
+        max_tokens: maxTokens,
         stream: false,
       }),
     });
@@ -455,7 +466,7 @@ export async function runDeepReflect(charId: string, limit = 500, project?: stri
       date: (m.createdAt || '').slice(0, 10),
     }));
     const userPrompt = `全部记忆列表：\n\n${JSON.stringify(slim, null, 1)}\n\n请深度分析，返回 JSON 操作对象。`;
-    const llm = await callLlm(buildDeepReflectPrompt(), userPrompt);
+    const llm = await callLlm(buildDeepReflectPrompt(), userPrompt, undefined, REFLECT_DEEP_MAX_TOKENS);
     if (!llm) return { ...base, errors: ['LLM 调用失败'] };
     const parsed = parseJsonRobust(llm.content || llm.reasoning);
     if (!parsed) return { ...base, errors: ['未找到有效 JSON 结果'] };
@@ -633,7 +644,7 @@ ${pairsJson}
 【近期对话转录】
 ${transcript || '无近期对话转录'}`;
 
-  const llm = await callLlm(buildConsolidationPrompt(), userPrompt);
+  const llm = await callLlm(buildConsolidationPrompt(), userPrompt, undefined, REFLECT_DEEP_MAX_TOKENS);
   if (!llm) return { ...base, scanned, candidates: candidates.length, errors: ['LLM 调用失败'] };
   const parsed = parseJsonRobust(llm.content || llm.reasoning);
   if (!parsed) return { ...base, scanned, candidates: candidates.length, errors: ['未找到有效 JSON 结果'] };
